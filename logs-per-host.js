@@ -146,7 +146,7 @@ function requestApiKey(state) {
     rl.question("\nWhat is your New Relic User API Key? ",
         async (key) => {
             rl.close();
-            // Track when we starterd scanning
+            // Track when we started scanning
             state.scanStarted = Date.now();
 
             process.stdout.write('Checking api key... ');
