@@ -82,7 +82,7 @@ const QUERIES = {
       actor {
         account(id: $accountId) {
           oneDayAgo:
-          nrql (query: "SELECT count(*) FROM Log WHERE entity.guids = 'ENTITY_GUID' SINCE 1 DAY AGO") {
+          nrql (query: "SELECT count(*) FROM Log WHERE indexname like 'xstore%' SINCE 1 DAY AGO FACET hostname LIMIT MAX ORDER BY hostname") {
             results
             metadata {
               timeWindow {
@@ -91,8 +91,15 @@ const QUERIES = {
               }
             }
           }
-          twoDaysAgo:
-          nrql (query: "SELECT count(*) FROM Log WHERE entity.guids = 'ENTITY_GUID' SINCE 2 DAYS AGO UNTIL 1 DAY AGO") {
+       
+        }
+      }
+    }`,
+    getMoreLogCountByEntity: `query getMoreLogCountByEntity($accountId:Int!) {
+      actor {
+        account(id: $accountId) {
+          oneDayAgo:
+          nrql (query: "SELECT count(*) FROM Log WHERE indexname like 'xstore%' AND hostname > 'HOSTNAME_HERE' SINCE 1 DAY AGO FACET hostname LIMIT MAX ORDER BY hostname") {
             results
             metadata {
               timeWindow {
@@ -101,6 +108,7 @@ const QUERIES = {
               }
             }
           }
+       
         }
       }
     }`
@@ -156,7 +164,10 @@ function requestApiKey(state) {
                 state.accountIds = accountIds;
                 process.stdout.write(` OK, found ${accountIds.length} accounts.\n`);
                 let hosts = await findHosts(state);
-                await findLogCountByHost(state, hosts)
+                const accountsWithHosts = [...new Set(hosts.map(item => item.accountId))]
+                let hostsWithLogs = await findLogCountByHost(state, accountsWithHosts);
+                process.stdout.write('Number of hosts with logs: ' + hostsWithLogs.length);
+
             } else {
                 process.stdout.write('ERROR, api key is invalid or I failed to connect to New Relic API.\n');
                 process.exit(1);
@@ -186,7 +197,7 @@ async function findHosts(state) {
     const entityCount = resultSet['actor']['entitySearch']['count'];
     process.stdout.write(`Checking ${entityCount} hosts...   `);
 
-    var batch = 1;
+    let batch = 1;
     while (resultSet) {
         for (const host of resultSet['actor']['entitySearch']['results']['entities']) {
             if (host['guid']) {
@@ -206,22 +217,42 @@ async function findHosts(state) {
     }
     process.stdout.write(`\b\b\b done. Actual host count is ${hosts.length}.\n`);
     return hosts;
-
-
 }
 
-function findLogCountByHost(state, hosts) {
+async function findLogCountByHost(state, accounts) {
 
-    hosts.forEach(async function(host) {
-        try {
-            const data = await nerdgraphQuery(state.apiKey, QUERIES.getLogCountByEntity.replace('ENTITY_GUID',host['guid']), {accountId: host['accountId']});
-            process.stdout.write('Count: ' + data['actor']['account']['results'] + '\n' || 'nothing to output')
-        }
-        catch {
-            process.stderr.write(`\nError fetching data for ${host['guid']}: ${err.toString()}\n`);
-        }
-    })
+    state.hostsWithLogs = state.hostsWithLogs || [];
 
+    let hostsWithLogs = [];
+    for (const account of accounts) {
+            let data = await nerdgraphQuery(state.apiKey, QUERIES.getLogCountByEntity, {accountId: account});
+
+            while (data) {
+                const rowCount = data['actor']['account']['oneDayAgo']['results'].length;
+                for (const hostWithLogs of data['actor']['account']['oneDayAgo']['results']) {
+                    if (hostWithLogs['facet']) {
+                        hostsWithLogs.push({
+                            'accountId': account,
+                            'hostname': hostWithLogs['hostname'],
+                            'logCount': hostWithLogs['count']
+                        })
+                    }
+                }
+                if (rowCount === 2000) {
+                    process.stdout.write('Requerying...\n');
+                    //find the last hostname by alpha
+                    let alphaHostNames = [...new Set(data['actor']['account']['oneDayAgo']['results'].map(item => item.hostname))].sort();
+                    process.stdout.write('Rows in latest query: ' + String(alphaHostNames.length) + '\n');
+                    process.stdout.write('Last item in alphaHostNames array: ' + alphaHostNames[alphaHostNames.length - 1] + '\n');
+                    //requery with hostname > than last hostname
+                    data = await nerdgraphQuery(state.apiKey, QUERIES.getMoreLogCountByEntity.replace('HOSTNAME_HERE', alphaHostNames[alphaHostNames.length - 1]), {accountId: account});
+                } else {
+                    process.stdout.write('start churning...\n');
+                    break;
+                }
+            }
+   }
+    return hostsWithLogs;
 }
 
 async function nerdgraphQuery(apiKey, query, variables={}) {
