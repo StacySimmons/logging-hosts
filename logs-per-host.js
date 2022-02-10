@@ -82,7 +82,7 @@ const QUERIES = {
       actor {
         account(id: $accountId) {
           oneDayAgo:
-          nrql (query: "SELECT count(*) FROM Log WHERE indexname like 'xstore%' SINCE 1 DAY AGO FACET hostname LIMIT MAX ORDER BY hostname") {
+          nrql (query: "SELECT count(*) FROM Log WHERE indexname like 'xstore%' SINCE 1 DAY AGO ORDER BY hostname FACET hostname LIMIT MAX") {
             results
             metadata {
               timeWindow {
@@ -99,7 +99,7 @@ const QUERIES = {
       actor {
         account(id: $accountId) {
           oneDayAgo:
-          nrql (query: "SELECT count(*) FROM Log WHERE indexname like 'xstore%' AND hostname > 'HOSTNAME_HERE' SINCE 1 DAY AGO FACET hostname LIMIT MAX ORDER BY hostname") {
+          nrql (query: "SELECT count(*) FROM Log WHERE indexname like 'xstore%' AND hostname > 'HOSTNAME_HERE' SINCE 1 DAY AGO ORDER BY hostname FACET hostname LIMIT MAX") {
             results
             metadata {
               timeWindow {
