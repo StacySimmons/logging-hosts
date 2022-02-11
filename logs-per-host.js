@@ -150,6 +150,11 @@ function requestApiKey(state) {
                 const accountsWithHosts = [...new Set(hosts.map(item => item.accountId))]
                 let hostsWithLogs_1DayAgo = await findLogHosts(state, accountsWithHosts, 'SINCE 1 DAY AGO');
                 let hostsWithLogs_2DaysAgo = await findLogHosts(state,accountsWithHosts, 'SINCE 2 DAYS AGO UNTIL 1 DAY AGO')
+                const inHostsNotInOneDayLogs = hosts.filter(({ hostname: hostname1 }) => !hostsWithLogs_1DayAgo.some(({ hostname: hostname2 }) => hostname2 === hostname1));
+                const inOneDayLogsNotHosts = hostsWithLogs_1DayAgo.filter(({ hostname: hostname1 }) => !hosts.some(({ hostname: hostname2 }) => hostname2 === hostname1));
+                const inDayOneNotDayTwo = hostsWithLogs_1DayAgo.filter(({ hostname: hostname1 }) => !hostsWithLogs_2DaysAgo.some(({ hostname: hostname2 }) => hostname2 === hostname1));
+                const inDayTwoNotDayOne = hostsWithLogs_2DaysAgo.filter(({ hostname: hostname1 }) => !hostsWithLogs_1DayAgo.some(({ hostname: hostname2 }) => hostname2 === hostname1));
+
                 process.stdout.write("A nice place to pause...\n")
 
             } else {
@@ -185,7 +190,7 @@ async function findHosts(state) {
     while (resultSet) {
         for (const host of resultSet['actor']['entitySearch']['results']['entities']) {
             if (host['guid']) {
-                hosts.push({'guid': host['guid'], 'accountId': host['accountId']})
+                hosts.push({'guid': host['guid'], 'accountId': host['accountId'], 'hostname': host['name']})
             }
         }
 
