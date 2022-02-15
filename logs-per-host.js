@@ -1,7 +1,14 @@
 const https = require('https');
-const readline = require('readline')
+const fs = require('fs');
 
-const INTRO_TEXT = `We'll put some intro text here later.`
+const INTRO_TEXT = `
+This script identifies hosts that have reported to New Relic but which are not reporting logs. 
+The script queries two time buckets of 24 hours to identify any hosts which may have once reported logs, but which
+are not longer reporting logs. Required flags are:
+   --apikey YOUR_NEW_RELIC_API_KEY
+   --json
+
+Be aware that he current version support json output only.`
 
 const REGIONS = {
     'us': 'https://api.newrelic.com/graphql',
@@ -9,7 +16,6 @@ const REGIONS = {
 };
 
 let NERDGRAPH_URL = REGIONS['us'];
-let USER_API_KEY = undefined;
 
 const CERT_ERROR_HELP = `
 Uh oh, I think you're behind an HTTPS proxy with a self-signed or internal
@@ -82,7 +88,7 @@ const QUERIES = {
       actor {
         account(id: $accountId) {
           oneDayAgo:
-          nrql (query: "SELECT uniques(hostname,10000) FROM Log WHERE indexname like 'xstore%' SINCE_CLAUSE") {
+          nrql (query: "SELECT uniques(hostname,10000) FROM Log WHERE indexname like 'xstore%' SINCE_CLAUSE", timeout: 10) {
             results
             metadata {
               timeWindow {
@@ -97,79 +103,89 @@ const QUERIES = {
     }`
 };
 
-function requestRegion(state) {
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-    rl.question(`What region shall we examine (options: ${Object.keys(REGIONS).join(' ')}; default: us)? `,
-        (region) => {
-            rl.close();
-            if (region) {
-                region = region.toLowerCase();
-                if (REGIONS[region]) {
-                    state.region = region;
-                    NERDGRAPH_URL = REGIONS[region];
-                } else {
-                    process.stdout.write(`\nPlease enter a valid region name, or just hit 'return' to default to the US region.\nValid options are: ${Object.keys(REGIONS).join(' ')}\n`);
-                    process.exit(2);
-                }
-            }
-            process.stdout.write(`API endpoint: ${NERDGRAPH_URL}\n`);
+async function processArgs(state) {
+    const apikeyIndex = process.argv.indexOf('--apikey');
+    const regionIndex = process.argv.indexOf('--region');
+    const useCsv = process.argv.includes('--csv');
+    const useJson = process.argv.includes('--json');
 
-            requestApiKey(state);
+    if (apikeyIndex > -1) {
+        state.apiKey = process.argv[apikeyIndex + 1];
+        process.stdout.write('API Key: ' + state.apiKey + '\n');
+    }
+    else {
+        process.stdout.write('This script requires a New Relic User API key. Please refer to the usage instructions.\n')
+        process.stdout.write(INTRO_TEXT + '\n');
+        process.exit(5);
+    }
+
+    if (regionIndex > -1) {
+        let region = process.argv[regionIndex + 1];
+        region = region.toLowerCase();
+        if (REGIONS[region]) {
+            state.region = region;
+            NERDGRAPH_URL = REGIONS[region];
+        } else {
+            process.stdout.write(`\nRegion name ${region} is invalid.\nValid options are: ${Object.keys(REGIONS).join(', ')}\n`);
+            process.exit(2);
         }
-    );
+        process.stdout.write(`API endpoint: ${NERDGRAPH_URL}\n`);
+    }
+    else {
+        process.stdout.write('Using default region (us)...\n');
+    }
+
+    useCsv ? state.useCsv = true : state.useCsv = false;
+    useJson ? state.useJson = true : state.useJson = false;
+
+    state.scanStarted = Date.now();
+
+    process.stdout.write('Checking api key... ');
+
+    const accountIds = await fetchAccountIds(state);
+    if (accountIds !== undefined && accountIds.length > 0) {
+        state.accountIds = accountIds;
+        process.stdout.write(` OK, found ${accountIds.length} accounts.\n`);
+        let hosts = await findHosts(state);
+        const accountsWithHosts = [...new Set(hosts.map(item => item.accountId))]
+        let hostsWithLogs_1DayAgo = await findLogHosts(state, accountsWithHosts, 'SINCE 1 DAY AGO');
+        let hostsWithLogs_2DaysAgo = await findLogHosts(state,accountsWithHosts, 'SINCE 2 DAYS AGO UNTIL 1 DAY AGO')
+        state.inHostsNotInOneDayLogs = hosts.filter(({ hostname: hostname1 }) => !hostsWithLogs_1DayAgo.some(({ hostname: hostname2 }) => hostname2 === hostname1));
+        state.inOneDayLogsNotHosts = hostsWithLogs_1DayAgo.filter(({ hostname: hostname1 }) => !hosts.some(({ hostname: hostname2 }) => hostname2 === hostname1));
+        state.inDayOneNotDayTwo = hostsWithLogs_1DayAgo.filter(({ hostname: hostname1 }) => !hostsWithLogs_2DaysAgo.some(({ hostname: hostname2 }) => hostname2 === hostname1));
+        state.inDayTwoNotDayOne = hostsWithLogs_2DaysAgo.filter(({ hostname: hostname1 }) => !hostsWithLogs_1DayAgo.some(({ hostname: hostname2 }) => hostname2 === hostname1));
+        const finalOutput = {"inHostsNotInOneDayLogs":state.inHostsNotInOneDayLogs,"inOneDayLogsNotHosts":state.inOneDayLogsNotHosts, "inDayOneNotDayTwo":state.inDayTwoNotDayOne, "inDayTwoNotDayOne":state.inDayTwoNotDayOne}
+        writeResults(finalOutput);
+
+    } else {
+        process.stdout.write('ERROR, api key is invalid or I failed to connect to New Relic API.\n');
+        process.exit(1);
+    }
+
 }
 
-/**
- * Prompt the user to enter an API key from the console, then test the key by fetching the accessible accounts list.
- *
- * If ≥ 1 account is successfully read, then this function executes `findHosts()`. Otherwise, prints an error and exits.
- *
- * @param {out} state - an object whose apiKey and accountIds properties will be populated by this call
- */
-function requestApiKey(state) {
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-    rl.question("\nWhat is your New Relic User API Key? ",
-        async (key) => {
-            rl.close();
-            // Track when we started scanning
-            state.scanStarted = Date.now();
+function writeResults(output) {
+    const fileTimestamp = new Date().toISOString().replace(/:/g, '-');
 
-            process.stdout.write('Checking api key... ');
-            state.apiKey = key;
-            const accountIds = await fetchAccountIds(state);
-            if (accountIds != undefined && accountIds.length > 0) {
-                state.accountIds = accountIds;
-                process.stdout.write(` OK, found ${accountIds.length} accounts.\n`);
-                let hosts = await findHosts(state);
-                const accountsWithHosts = [...new Set(hosts.map(item => item.accountId))]
-                let hostsWithLogs_1DayAgo = await findLogHosts(state, accountsWithHosts, 'SINCE 1 DAY AGO');
-                let hostsWithLogs_2DaysAgo = await findLogHosts(state,accountsWithHosts, 'SINCE 2 DAYS AGO UNTIL 1 DAY AGO')
-                const inHostsNotInOneDayLogs = hosts.filter(({ hostname: hostname1 }) => !hostsWithLogs_1DayAgo.some(({ hostname: hostname2 }) => hostname2 === hostname1));
-                const inOneDayLogsNotHosts = hostsWithLogs_1DayAgo.filter(({ hostname: hostname1 }) => !hosts.some(({ hostname: hostname2 }) => hostname2 === hostname1));
-                const inDayOneNotDayTwo = hostsWithLogs_1DayAgo.filter(({ hostname: hostname1 }) => !hostsWithLogs_2DaysAgo.some(({ hostname: hostname2 }) => hostname2 === hostname1));
-                const inDayTwoNotDayOne = hostsWithLogs_2DaysAgo.filter(({ hostname: hostname1 }) => !hostsWithLogs_1DayAgo.some(({ hostname: hostname2 }) => hostname2 === hostname1));
+    if (state.useJson) {
+        const jsonOutputFile = `logging_hosts_${state.region}_${fileTimestamp}.json`;
+        fs.writeFileSync(
+            jsonOutputFile,
+            JSON.stringify(output)
+        );
+        process.stdout.write(`Wrote results to ${jsonOutputFile}\n`);
+    }
 
-                process.stdout.write("A nice place to pause...\n")
-
-            } else {
-                process.stdout.write('ERROR, api key is invalid or I failed to connect to New Relic API.\n');
-                process.exit(1);
-            }
-        }
-    );
+    if (state.useCsv) {
+        const csvOutputFile = `logging_hosts_${state.region}_${fileTimestamp}.csv`;
+        //Future state: CSV output option
+    }
 }
 
 async function fetchAccountIds(state) {
     try {
         const res = await nerdgraphQuery(state.apiKey, QUERIES.accessibleAccounts);
-        const accountIds = res['actor']['accounts'].map(a => a['id']);
-        return accountIds;
+        return res['actor']['accounts'].map(a => a['id']);
     } catch (err) {
         process.stderr.write(`Error requesting accessible accounts from New Relic api.\n`);
         process.stderr.write(err.toString() + '\n');
@@ -214,9 +230,9 @@ async function findLogHosts(state, accounts, since) {
 
     let hostsWithLogs = [];
     for (const account of accounts) {
-        let data = await nerdgraphQuery(state.apiKey, QUERIES.getLogHosts.replace('SINCE_CLAUSE', 'SINCE 1 DAY AGO'), {accountId: account});
+        let data = await nerdgraphQuery(state.apiKey, QUERIES.getLogHosts.replace('SINCE_CLAUSE', since), {accountId: account});
 
-        const rowCount = data['actor']['account']['oneDayAgo']['results'][0]['uniques.hostname'].length;
+//        const rowCount = data['actor']['account']['oneDayAgo']['results'][0]['uniques.hostname'].length;
         for (const hostWithLogs of data['actor']['account']['oneDayAgo']['results'][0]['uniques.hostname']) {
             if (hostWithLogs) {
                 hostsWithLogs.push({'accountId': account,'hostname': hostWithLogs})
@@ -325,9 +341,7 @@ function buildRequestPromise(apiKey, payload) {
 
 
 try {
-    process.stdout.write(INTRO_TEXT);
-    requestRegion(STATE);
-
+    processArgs(state)
 }
 catch {
 
