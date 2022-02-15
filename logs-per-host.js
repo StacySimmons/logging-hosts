@@ -8,7 +8,7 @@ are not longer reporting logs. Required flags are:
    --apikey YOUR_NEW_RELIC_API_KEY
    --json
 
-Be aware that he current version support json output only.`
+Be aware that the current version supports json output only.`
 
 const REGIONS = {
     'us': 'https://api.newrelic.com/graphql',
